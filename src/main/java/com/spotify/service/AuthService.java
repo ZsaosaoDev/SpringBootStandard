@@ -1,11 +1,17 @@
 package com.spotify.service;
 
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import com.google.api.client.util.Value;
 import com.spotify.dto.request.LoginRequest;
 import com.spotify.dto.request.LogoutRequest;
 import com.spotify.dto.request.RegisterRequest;
 import com.spotify.dto.response.AuthResponse;
 import com.spotify.entity.RefreshToken;
 import com.spotify.entity.User;
+import com.spotify.entity.UserAuthProvider;
+import com.spotify.enums.AuthProvider;
 import com.spotify.enums.RoleEnum;
 import com.spotify.exception.EmailAlreadyExistsException;
 import com.spotify.repository.RoleRepository;
@@ -16,14 +22,22 @@ import com.spotify.util.JwtUtil;
 import com.spotify.util.ValidationUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.util.Collections;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-
+import com.spotify.repository.UserAuthProviderRepository;
+import com.google.api.client.json.jackson2.JacksonFactory;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.concurrent.TimeUnit;
 
@@ -39,13 +53,14 @@ public class AuthService {
     private final JwtBlacklistService jwtBlacklistService;
     private final VerificationService verificationService;
     private final StringRedisTemplate redisTemplate;
+    private UserAuthProviderRepository userAuthProviderRepository;
 
     private static final long TEMP_PASSWORD_EXPIRATION = 10; // 10 minutes
 
     public AuthService(UserRepository userRepository, JwtUtil jwtUtil, AuthenticationManager authenticationManager,
                        PasswordEncoder passwordEncoder, CustomUserDetailsService userDetailsService,
                        RoleRepository roleRepository, RefreshTokenService refreshTokenService,
-                       StringRedisTemplate redisTemplate,VerificationService verificationService) {
+                       StringRedisTemplate redisTemplate,VerificationService verificationService, UserAuthProviderRepository userAuthProviderRepository) {
         this.userRepository = userRepository;
         this.jwtUtil = jwtUtil;
         this.authenticationManager = authenticationManager;
@@ -56,6 +71,7 @@ public class AuthService {
         this.jwtBlacklistService = new JwtBlacklistService(redisTemplate);
         this.verificationService = verificationService;
         this.redisTemplate = redisTemplate;
+        this.userAuthProviderRepository = userAuthProviderRepository;
     }
 
     public void storeTemporaryPassword(String email, String encodedPassword) {
@@ -76,11 +92,16 @@ public class AuthService {
 
     public AuthResponse login(LoginRequest request, HttpServletRequest httpRequest) {
         validateEmail(request.getEmail());
-        authenticateUser(request.getEmail(), request.getPassword());
 
         User user = getUserByEmail(request.getEmail());
+
+        if (user.getPassword() == null) {
+            throw new BadCredentialsException("Invalid email or password");
+        }
+        authenticateUser(request.getEmail(), request.getPassword());
+
         String accessToken = jwtUtil.generateAccessToken(userDetailsService.loadUserByUsername(request.getEmail()));
-        RefreshToken refreshToken = refreshTokenService.createRefreshToken(user, DeviceUtil.getDeviceType(httpRequest));
+        RefreshToken refreshToken = refreshTokenService.createRefreshToken(user, DeviceUtil.getDeviceId(httpRequest));
 
         return new AuthResponse(accessToken, refreshToken.getToken(), "User logged in successfully!");
     }
@@ -94,7 +115,7 @@ public class AuthService {
         // Lưu mật khẩu tạm thời vào Redis với thời gian hết hạn
         storeTemporaryPassword(email, passwordEncoder.encode(password));
 
-        // Gửi mã xác thực qua email
+//         Gửi mã xác thực qua email
         verificationService.sendVerificationCode(email);
 
         return "Verification code sent successfully! Please verify your email.";
@@ -111,9 +132,10 @@ public class AuthService {
             throw new IllegalArgumentException("No registration request found. Please start over.");
         }
 
-        User newUser = createUser(email, encodedPassword);
+        User newUser = createUserHashedPass(email, encodedPassword);
+        // đọc có vẻ khó hiểu nhờ overload lại hàm loadUserByUsername kiếm theo email rồi đổi tên không được
         String accessToken = jwtUtil.generateAccessToken(userDetailsService.loadUserByUsername(newUser.getEmail()));
-        RefreshToken refreshToken = refreshTokenService.createRefreshToken(newUser, DeviceUtil.getDeviceType(httpRequest));
+        RefreshToken refreshToken = refreshTokenService.createRefreshToken(newUser, DeviceUtil.getDeviceId(httpRequest));
 
         return new AuthResponse(accessToken, refreshToken.getToken(), "User registered successfully!");
     }
@@ -128,7 +150,7 @@ public class AuthService {
         }
 
         User user = getUserByEmail(logoutRequest.getEmail());
-        refreshTokenService.deleteByUserIdAndDeviceInfo(user.getId(), DeviceUtil.getDeviceType(request));
+        refreshTokenService.deleteByUserIdAndDeviceId(user.getId(), DeviceUtil.getDeviceId(request));
         jwtBlacklistService.blacklistToken(accessToken, jwtUtil.getExpirationFromToken(accessToken).getTime() - System.currentTimeMillis());
 
         return new AuthResponse(null, null, "User logged out successfully!");
@@ -140,18 +162,35 @@ public class AuthService {
         }
     }
 
-    private void authenticateUser(String email, String password) {
-        authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(email, password));
+    private void authenticateUser(String email, String rawPassword) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found!"));
+
+        if (!passwordEncoder.matches(rawPassword, user.getPassword())) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid email or password");
+        }
+
+        authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(email, rawPassword));
     }
 
     private User getUserByEmail(String email) {
         return userRepository.findByEmail(email).orElseThrow(() -> new RuntimeException("User not found!"));
     }
 
-    private User createUser(String email, String password) {
+    // set default user has role user
+    private User createUserHashedPass(String email, String HashedPass) {
         User user = new User();
         user.setEmail(email);
-        user.setPassword(passwordEncoder.encode(password));
+        user.setPassword(HashedPass);
+        user.setRoles(Set.of(roleRepository.findByName(RoleEnum.USER).orElseThrow(() -> new RuntimeException("Role not found"))));
+        return userRepository.save(user);
+    }
+
+    // set default user has role user
+    private User createUserOAuth(String email, String username) {
+        User user = new User();
+        user.setEmail(email);
+        user.setUsername(username);
         user.setRoles(Set.of(roleRepository.findByName(RoleEnum.USER).orElseThrow(() -> new RuntimeException("Role not found"))));
         return userRepository.save(user);
     }
@@ -168,6 +207,46 @@ public class AuthService {
             throw new RuntimeException("Invalid or expired token!");
         }
     }
+    @Value("${google.client.id}")
+    String GOOGLE_CLIENT_ID = "705243783215-ei795tnvk2891u4pqvftiea6h80rjb1h.apps.googleusercontent.com";
+    public AuthResponse loginOrRegisterWithGoogle(String idTokenString, HttpServletRequest request)
+            throws GeneralSecurityException, IOException {
+
+        GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(
+                new NetHttpTransport(), JacksonFactory.getDefaultInstance())
+                .setAudience(Collections.singletonList(GOOGLE_CLIENT_ID))
+                .build();
+        GoogleIdToken idToken = verifier.verify(idTokenString);
+        if (idToken == null) {
+            throw new RuntimeException("Token verification failed!");
+        }
+
+
+        GoogleIdToken.Payload payload = idToken.getPayload();
+        String googleUserId = payload.getSubject();
+        String email = payload.getEmail();
+        String username = (String) payload.get("name");
+
+//         Kiểm tra xem user đã đăng nhập bằng Google trước đó chưa
+        User user = userAuthProviderRepository.findByProviderAndProviderId(AuthProvider.GOOGLE, googleUserId)
+                .map(UserAuthProvider::getUser)
+                .orElseGet(() -> userRepository.findByEmail(email).orElseGet(() -> createUserOAuth(email, username)));
+
+        // Nếu đây là lần đầu tiên user đăng nhập bằng Google, lưu thông tin vào user_auth_providers
+        userAuthProviderRepository.findByProviderAndProviderId(AuthProvider.GOOGLE, googleUserId)
+                .orElseGet(() -> userAuthProviderRepository.save(new UserAuthProvider(user, AuthProvider.GOOGLE, googleUserId)));
+
+        // Tạo JWT và Refresh Token
+        String accessToken = jwtUtil.generateAccessToken(userDetailsService.loadUserByUsername(user.getEmail()));
+        RefreshToken refreshToken = refreshTokenService.createRefreshToken(user, DeviceUtil.getDeviceId(request));
+
+        return new AuthResponse(accessToken, refreshToken.getToken(), "User logged in successfully!");
+    }
+
+
+
+
+
 
 
 }

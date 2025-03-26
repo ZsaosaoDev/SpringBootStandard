@@ -36,7 +36,7 @@ public class RefreshTokenService {
         refreshToken.setUser(user);
         refreshToken.setToken(UUID.randomUUID().toString());
         refreshToken.setExpiryDate(Instant.now().plusMillis(refreshTokenDurationMs));
-        refreshToken.setDeviceInfo(deviceInfo);
+        refreshToken.setDeviceId(deviceInfo);
         return refreshTokenRepository.save(refreshToken);
     }
 
@@ -44,8 +44,8 @@ public class RefreshTokenService {
         return refreshTokenRepository.findByToken(token);
     }
 
-    public void deleteByUserIdAndDeviceInfo(Long userId, String deviceInfo) {
-        refreshTokenRepository.deleteByUserIdAndDeviceInfo(userId, deviceInfo);
+    public void deleteByUserIdAndDeviceId(Long userId, String deviceId) {
+        refreshTokenRepository.deleteByUserIdAndDeviceId(userId, deviceId);
     }
 
     public boolean validateToken(String token) {
