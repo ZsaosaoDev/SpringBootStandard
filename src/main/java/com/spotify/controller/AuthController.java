@@ -11,6 +11,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
@@ -36,7 +39,6 @@ public class AuthController {
     @PostMapping("/register")
     public ResponseEntity<AuthResponse> register(@RequestBody RegisterRequest request, HttpServletRequest httpRequest) {
         try {
-            // Bắt đầu quá trình đăng ký bằng cách gửi mã xác thực
             String message = authService.initiateRegistration(request.getEmail(), request.getPassword());
             return ResponseEntity.status(HttpStatus.OK).body(new AuthResponse(null, null, message));
         } catch (EmailAlreadyExistsException e) {
@@ -71,6 +73,17 @@ public class AuthController {
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(new AuthResponse(null, null, "Logout failed: " + e.getMessage()));
+        }
+    }
+
+    @PostMapping("/google")
+    public ResponseEntity<AuthResponse> loginWithGoogle(
+            @RequestBody GoogleAuthRequest googleAuthRequest, HttpServletRequest request) {
+        try {
+            AuthResponse response = authService.loginOrRegisterWithGoogle(googleAuthRequest.getIdToken(), request);
+            return ResponseEntity.ok(response);
+        } catch (GeneralSecurityException | IOException e) {
+            return ResponseEntity.badRequest().body(new AuthResponse(null, null, "Invalid Google token"));
         }
     }
 }

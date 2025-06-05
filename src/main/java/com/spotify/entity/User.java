@@ -4,10 +4,7 @@ import jakarta.persistence.*;
 import lombok.*;
 
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
 @Entity
 @Getter
@@ -21,11 +18,25 @@ public class User {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(unique = true, nullable = false)
+    @Column(unique = true, nullable = true)
     private String email;
 
-    @Column(nullable = false)
+    // Chỉ dùng cho đăng nhập truyền thống
+    @Column(nullable = true)
     private String password;
+
+
+
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<RefreshToken> refreshTokens = new ArrayList<>();
+
+    @Column(unique = false, nullable = true)
+    private String username;
+
+    @Column(nullable = false, updatable = false)
+    @Temporal(TemporalType.TIMESTAMP)
+    private Date createdAt = new Date();
+
 
     @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(
@@ -36,8 +47,5 @@ public class User {
     private Set<Role> roles = new HashSet<>();
 
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<RefreshToken> refreshTokens = new ArrayList<>();
-
-    @Column(unique = false, nullable = true)
-    private String username;
+    private List<UserAuthProvider> authProviders = new ArrayList<>();
 }

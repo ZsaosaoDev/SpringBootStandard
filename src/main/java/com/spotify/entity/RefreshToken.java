@@ -28,6 +28,6 @@ public class RefreshToken {
 
 
     @Column(nullable = false)
-    private String deviceInfo;
+    private String deviceId;
 
 }
